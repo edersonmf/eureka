@@ -1,8 +1,10 @@
 package com.netflix.appinfo.providers;
 
 import javax.inject.Inject;
+
 import java.util.Map;
 
+import com.google.common.base.Strings;
 import com.google.inject.Provider;
 import com.netflix.appinfo.EurekaInstanceConfig;
 import com.netflix.appinfo.InstanceInfo;
@@ -10,6 +12,7 @@ import com.netflix.appinfo.InstanceInfo.InstanceStatus;
 import com.netflix.appinfo.InstanceInfo.PortType;
 import com.netflix.appinfo.LeaseInfo;
 import com.netflix.governator.guice.lazy.LazySingleton;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,7 +59,7 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
                     .setAppName(config.getAppname())
                     .setAppGroupName(config.getAppGroupName())
                     .setDataCenterInfo(config.getDataCenterInfo())
-                    .setIPAddr(config.getIpAddress())
+                    .setIPAddr(IPResolver.resolve(config.getIpAddress()))
                     .setHostName(config.getHostName(false))
                     .setPort(config.getNonSecurePort())
                     .enablePort(PortType.UNSECURE,
@@ -99,4 +102,36 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
         return instanceInfo;
     }
 
+    /**
+     * IP address resolver.
+     * Typically this is useful when running eureka client inside linux containers. Containers always register
+     * themselves with local container's ip address, and in most cases it is supposed to be registered with
+     * host's IP address.
+     *
+     * @author Ederson Ferreira <a href="mailto:edersonmf@gmail.com">edersonmf@gmail.com</a>
+     */
+    private static final class IPResolver {
+
+        private static final String SYSTEM_PROP_IP = System.getProperty("eureka.instance.ip-address");
+
+        private static final String ENV_IP = System.getenv("EUREKA_INSTANCE_IP");
+
+        /**
+         * Resolves the IP address to something provided through system properties ({@value #SYSTEM_PROP_IP}
+         * or environment variable {@value #ENV_IP}.
+         * It follows precedence as: System.getProperty(); System.getenv() or defaults to value passed as parameter.
+         * @param defaultIp used as default IP address if no system property or environment variables are provided.
+         * @return the IP address resolved.
+         */
+        public static final String resolve(final String defaultIp) {
+            if (!Strings.isNullOrEmpty(SYSTEM_PROP_IP)) {
+                return SYSTEM_PROP_IP;
+            }
+            if (!Strings.isNullOrEmpty(ENV_IP)) {
+                return SYSTEM_PROP_IP;
+            }
+            return defaultIp;
+        }
+
+    }
 }
