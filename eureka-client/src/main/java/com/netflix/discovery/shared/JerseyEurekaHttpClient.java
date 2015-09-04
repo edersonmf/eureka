@@ -1,16 +1,18 @@
 package com.netflix.discovery.shared;
 
+import javax.ws.rs.client.Client;
+import javax.ws.rs.client.Entity;
+import javax.ws.rs.client.Invocation.Builder;
+import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.appinfo.InstanceInfo.InstanceStatus;
-import com.sun.jersey.api.client.ClientResponse;
-import com.sun.jersey.api.client.WebResource;
-import com.sun.jersey.api.client.WebResource.Builder;
-import com.sun.jersey.client.apache4.ApacheHttpClient4;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * @author Tomasz Bak
@@ -19,26 +21,27 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
 
     private static final Logger logger = LoggerFactory.getLogger(JerseyEurekaHttpClient.class);
 
+    private static final Entity<String> EMPTY = Entity.text("");
+
     protected final String serviceUrl;
 
     protected JerseyEurekaHttpClient(String serviceUrl) {
         this.serviceUrl = serviceUrl;
     }
 
-    protected abstract ApacheHttpClient4 getJerseyApacheClient();
+    protected abstract Client getJerseyApacheClient();
 
     @Override
     public HttpResponse<Void> register(InstanceInfo info) {
         String urlPath = "apps/" + info.getAppName();
-        ClientResponse response = null;
+        Response response = null;
         try {
-            Builder resourceBuilder = getJerseyApacheClient().resource(serviceUrl).path(urlPath).getRequestBuilder();
+            Builder resourceBuilder = getJerseyApacheClient().target(serviceUrl).path(urlPath).request();
             addExtraHeaders(resourceBuilder);
             response = resourceBuilder
                     .header("Accept-Encoding", "gzip")
-                    .type(MediaType.APPLICATION_JSON_TYPE)
                     .accept(MediaType.APPLICATION_JSON)
-                    .post(ClientResponse.class, info);
+                    .post(Entity.json(info));
             return HttpResponse.responseWith(response.getStatus());
         } finally {
             if (logger.isDebugEnabled()) {
@@ -54,11 +57,11 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
     @Override
     public HttpResponse<Void> cancel(String appName, String id) {
         String urlPath = "apps/" + appName + "/" + id;
-        ClientResponse response = null;
+        Response response = null;
         try {
-            Builder resourceBuilder = getJerseyApacheClient().resource(serviceUrl).path(urlPath).getRequestBuilder();
+            Builder resourceBuilder = getJerseyApacheClient().target(serviceUrl).path(urlPath).request();
             addExtraHeaders(resourceBuilder);
-            response = resourceBuilder.delete(ClientResponse.class);
+            response = resourceBuilder.delete();
             return HttpResponse.responseWith(response.getStatus());
         } finally {
             if (logger.isDebugEnabled()) {
@@ -73,17 +76,18 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
     @Override
     public HttpResponse<InstanceInfo> sendHeartBeat(String appName, String id, InstanceInfo info, InstanceStatus overriddenStatus) {
         String urlPath = "apps/" + appName + '/' + id;
-        ClientResponse response = null;
+        Response response = null;
         try {
-            WebResource webResource = getJerseyApacheClient().resource(serviceUrl)
+            WebTarget webResource = getJerseyApacheClient().target(serviceUrl)
                     .path(urlPath)
                     .queryParam("status", info.getStatus().toString())
                     .queryParam("lastDirtyTimestamp", info.getLastDirtyTimestamp().toString());
             if (overriddenStatus != null) {
                 webResource = webResource.queryParam("overriddenstatus", overriddenStatus.name());
             }
-            Builder requestBuilder = webResource.getRequestBuilder();
+            Builder requestBuilder = webResource.request();
             addExtraHeaders(requestBuilder);
+            response = requestBuilder.get();
             return HttpResponse.responseWith(response.getStatus());
         } finally {
             if (logger.isDebugEnabled()) {
@@ -98,15 +102,15 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
     @Override
     public HttpResponse<Void> statusUpdate(String appName, String id, InstanceStatus newStatus, InstanceInfo info) {
         String urlPath = "apps/" + appName + "/" + id + "/status";
-        ClientResponse response = null;
+        Response response = null;
         try {
-            Builder requestBuilder = getJerseyApacheClient().resource(serviceUrl)
+            Builder requestBuilder = getJerseyApacheClient().target(serviceUrl)
                     .path(urlPath)
                     .queryParam("value", newStatus.name())
                     .queryParam("lastDirtyTimestamp", info.getLastDirtyTimestamp().toString())
-                    .getRequestBuilder();
+                    .request();
             addExtraHeaders(requestBuilder);
-            response = requestBuilder.put(ClientResponse.class);
+            response = requestBuilder.put(EMPTY);
             return HttpResponse.responseWith(response.getStatus());
         } finally {
             if (logger.isDebugEnabled()) {
@@ -121,14 +125,14 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
     @Override
     public HttpResponse<Void> deleteStatusOverride(String appName, String id, InstanceInfo info) {
         String urlPath = "apps/" + appName + '/' + id + "/status";
-        ClientResponse response = null;
+        Response response = null;
         try {
-            Builder requestBuilder = getJerseyApacheClient().resource(serviceUrl)
+            Builder requestBuilder = getJerseyApacheClient().target(serviceUrl)
                     .path(urlPath)
                     .queryParam("lastDirtyTimestamp", info.getLastDirtyTimestamp().toString())
-                    .getRequestBuilder();
+                    .request();
             addExtraHeaders(requestBuilder);
-            response = requestBuilder.delete(ClientResponse.class);
+            response = requestBuilder.delete();
             return HttpResponse.responseWith(response.getStatus());
         } finally {
             if (logger.isDebugEnabled()) {
@@ -143,15 +147,15 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
     @Override
     public HttpResponse<Applications> getApplications() {
         String urlPath = "apps/";
-        ClientResponse response = null;
+        Response response = null;
         try {
-            Builder requestBuilder = getJerseyApacheClient().resource(serviceUrl).path(urlPath).getRequestBuilder();
+            Builder requestBuilder = getJerseyApacheClient().target(serviceUrl).path(urlPath).request();
             addExtraHeaders(requestBuilder);
-            response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get(ClientResponse.class);
+            response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get();
 
             Applications applications = null;
             if (response.getStatus() == Status.OK.getStatusCode() && response.hasEntity()) {
-                applications = response.getEntity(Applications.class);
+                applications = response.readEntity(Applications.class);
             }
             return HttpResponse.responseWith(response.getStatus(), applications);
         } finally {
@@ -167,15 +171,15 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
     @Override
     public HttpResponse<Applications> getDelta() {
         String urlPath = "apps/delta";
-        ClientResponse response = null;
+        Response response = null;
         try {
-            Builder requestBuilder = getJerseyApacheClient().resource(serviceUrl).path(urlPath).getRequestBuilder();
+            Builder requestBuilder = getJerseyApacheClient().target(serviceUrl).path(urlPath).request();
             addExtraHeaders(requestBuilder);
-            response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get(ClientResponse.class);
+            response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get();
 
             Applications applications = null;
             if (response.getStatus() == Status.OK.getStatusCode() && response.hasEntity()) {
-                applications = response.getEntity(Applications.class);
+                applications = response.readEntity(Applications.class);
             }
             return HttpResponse.responseWith(response.getStatus(), applications);
         } finally {
@@ -191,15 +195,15 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
     @Override
     public HttpResponse<InstanceInfo> getInstance(String appName, String id) {
         String urlPath = "apps/" + appName + '/' + id;
-        ClientResponse response = null;
+        Response response = null;
         try {
-            Builder requestBuilder = getJerseyApacheClient().resource(serviceUrl).path(urlPath).getRequestBuilder();
+            Builder requestBuilder = getJerseyApacheClient().target(serviceUrl).path(urlPath).request();
             addExtraHeaders(requestBuilder);
-            response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get(ClientResponse.class);
+            response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get();
 
             InstanceInfo infoFromPeer = null;
             if (response.getStatus() == Status.OK.getStatusCode() && response.hasEntity()) {
-                infoFromPeer = response.getEntity(InstanceInfo.class);
+                infoFromPeer = response.readEntity(InstanceInfo.class);
             }
             return HttpResponse.responseWith(response.getStatus(), infoFromPeer);
         } finally {
@@ -214,7 +218,7 @@ public abstract class JerseyEurekaHttpClient implements EurekaHttpClient {
 
     @Override
     public void shutdown() {
-        getJerseyApacheClient().destroy();
+        getJerseyApacheClient().close();
     }
 
     protected void addExtraHeaders(Builder webResource) {

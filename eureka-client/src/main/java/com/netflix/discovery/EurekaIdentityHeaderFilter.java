@@ -1,12 +1,13 @@
 package com.netflix.discovery;
 
-import com.netflix.appinfo.AbstractEurekaIdentity;
-import com.sun.jersey.api.client.ClientHandlerException;
-import com.sun.jersey.api.client.ClientRequest;
-import com.sun.jersey.api.client.ClientResponse;
-import com.sun.jersey.api.client.filter.ClientFilter;
+import java.io.IOException;
 
-public class EurekaIdentityHeaderFilter extends ClientFilter {
+import javax.ws.rs.client.ClientRequestContext;
+import javax.ws.rs.client.ClientRequestFilter;
+
+import com.netflix.appinfo.AbstractEurekaIdentity;
+
+public class EurekaIdentityHeaderFilter implements ClientRequestFilter {
 
     private final AbstractEurekaIdentity authInfo;
 
@@ -15,16 +16,14 @@ public class EurekaIdentityHeaderFilter extends ClientFilter {
     }
 
     @Override
-    public ClientResponse handle(ClientRequest cr) throws ClientHandlerException {
+    public void filter(ClientRequestContext requestContext) throws IOException {
         if (authInfo != null) {
-            cr.getHeaders().putSingle(AbstractEurekaIdentity.AUTH_NAME_HEADER_KEY, authInfo.getName());
-            cr.getHeaders().putSingle(AbstractEurekaIdentity.AUTH_VERSION_HEADER_KEY, authInfo.getVersion());
+            requestContext.getHeaders().putSingle(AbstractEurekaIdentity.AUTH_NAME_HEADER_KEY, authInfo.getName());
+            requestContext.getHeaders().putSingle(AbstractEurekaIdentity.AUTH_VERSION_HEADER_KEY, authInfo.getVersion());
 
-            if (authInfo.getId() != null) {
-                cr.getHeaders().putSingle(AbstractEurekaIdentity.AUTH_ID_HEADER_KEY, authInfo.getId());
-            }
+        if (authInfo.getId() != null) {
+            requestContext.getHeaders().putSingle(AbstractEurekaIdentity.AUTH_ID_HEADER_KEY, authInfo.getId());
         }
-
-        return getNext().handle(cr);
+    }
     }
 }

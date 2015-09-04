@@ -1,5 +1,13 @@
 package com.netflix.eureka.resources;
 
+import static org.hamcrest.CoreMatchers.equalTo;
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.notNullValue;
+import static org.hamcrest.CoreMatchers.nullValue;
+import static org.junit.Assert.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import java.io.File;
 import java.io.FilenameFilter;
 import java.net.InetAddress;
@@ -8,6 +16,16 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.regex.Pattern;
+
+import javax.ws.rs.client.Client;
+
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.webapp.WebAppContext;
+import org.glassfish.jersey.client.filter.EncodingFilter;
+import org.glassfish.jersey.message.GZipEncoder;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.appinfo.InstanceInfo.InstanceStatus;
@@ -23,21 +41,6 @@ import com.netflix.eureka.cluster.protocol.ReplicationInstance;
 import com.netflix.eureka.cluster.protocol.ReplicationInstanceResponse;
 import com.netflix.eureka.cluster.protocol.ReplicationList;
 import com.netflix.eureka.cluster.protocol.ReplicationListResponse;
-import com.sun.jersey.api.client.filter.GZIPContentEncodingFilter;
-import com.sun.jersey.client.apache4.ApacheHttpClient4;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.webapp.WebAppContext;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.CoreMatchers.notNullValue;
-import static org.hamcrest.CoreMatchers.nullValue;
-import static org.junit.Assert.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Test REST layer of client/server communication. This test instantiates fully configured Jersey container,
@@ -77,15 +80,16 @@ public class EurekaClientServerRestIntegrationTest {
             public JerseyClient jerseyClient;
 
             @Override
-            protected ApacheHttpClient4 getJerseyApacheClient() {
+            protected Client getJerseyApacheClient() {
                 jerseyClient = EurekaJerseyClient.createJerseyClient("testEurekaClient",
                         1000,  // connection timeout
                         1000,  // read timeout
                         1,     // max connections per host
                         1,     // max total connections
                         1000); // connection idle timeout
-                ApacheHttpClient4 jerseyApacheClient = jerseyClient.getClient();
-                jerseyApacheClient.addFilter(new GZIPContentEncodingFilter(true));
+                Client jerseyApacheClient = jerseyClient.getClient();
+                jerseyApacheClient.register(GZipEncoder.class);
+                jerseyApacheClient.register(EncodingFilter.class);
                 return jerseyApacheClient;
             }
 

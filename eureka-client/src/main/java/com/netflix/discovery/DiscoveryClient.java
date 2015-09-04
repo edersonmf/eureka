@@ -16,11 +16,6 @@
 
 package com.netflix.discovery;
 
-import javax.annotation.Nullable;
-import javax.annotation.PreDestroy;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response.Status;
-import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
@@ -48,6 +43,21 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.annotation.Nullable;
+import javax.annotation.PreDestroy;
+import javax.ws.rs.client.Client;
+import javax.ws.rs.client.Entity;
+import javax.ws.rs.client.WebTarget;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.core.Response.Status;
+import javax.ws.rs.core.UriBuilder;
+
+import org.glassfish.jersey.client.filter.EncodingFilter;
+import org.glassfish.jersey.message.GZipEncoder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
@@ -61,7 +71,6 @@ import com.netflix.appinfo.HealthCheckHandler;
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.appinfo.InstanceInfo.ActionType;
 import com.netflix.appinfo.InstanceInfo.InstanceStatus;
-import com.netflix.config.DynamicPropertyFactory;
 import com.netflix.discovery.shared.Application;
 import com.netflix.discovery.shared.Applications;
 import com.netflix.discovery.shared.EurekaJerseyClient;
@@ -71,12 +80,6 @@ import com.netflix.governator.guice.lazy.FineGrainedLazySingleton;
 import com.netflix.servo.monitor.Counter;
 import com.netflix.servo.monitor.Monitors;
 import com.netflix.servo.monitor.Stopwatch;
-import com.sun.jersey.api.client.ClientResponse;
-import com.sun.jersey.api.client.WebResource;
-import com.sun.jersey.api.client.filter.GZIPContentEncodingFilter;
-import com.sun.jersey.client.apache4.ApacheHttpClient4;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The class that is instrumental for interactions with <tt>Eureka Server</tt>.
@@ -104,7 +107,6 @@ import org.slf4j.LoggerFactory;
 @FineGrainedLazySingleton
 public class DiscoveryClient implements EurekaClient {
     private static final Logger logger = LoggerFactory.getLogger(DiscoveryClient.class);
-    private static final DynamicPropertyFactory configInstance = DynamicPropertyFactory.getInstance();
 
     // Constants
     public static final int MAX_FOLLOWED_REDIRECTS = 10;
@@ -114,6 +116,8 @@ public class DiscoveryClient implements EurekaClient {
     private static final String COMMA_STRING = VALUE_DELIMITER;
     private static final String DISCOVERY_APPID = "DISCOVERY";
     private static final String UNKNOWN = "UNKNOWN";
+
+    private static final Entity<String> EMPTY = Entity.text("");
 
     private static final Pattern REDIRECT_PATH_REGEX = Pattern.compile("(.*/v2/)apps(/.*)?$");
 
@@ -160,7 +164,7 @@ public class DiscoveryClient implements EurekaClient {
     private JerseyClient discoveryJerseyClient;
     private AtomicReference<String> lastQueryRedirect = new AtomicReference<String>();
     private AtomicReference<String> lastRegisterRedirect = new AtomicReference<String>();
-    private ApacheHttpClient4 discoveryApacheClient;
+    private Client jerseylient;
     protected static EurekaClientConfig clientConfig;
     private final AtomicReference<String> remoteRegionsToFetch;
     private final InstanceRegionChecker instanceRegionChecker;
@@ -315,8 +319,7 @@ public class DiscoveryClient implements EurekaClient {
                         clientConfig.getEurekaServerTotalConnectionsPerHost(),
                         clientConfig.getEurekaServerTotalConnections(),
                         clientConfig.getEurekaConnectionIdleTimeoutSeconds(),
-                        clientConfig.getProxyHost(), clientConfig.getProxyPort(),
-                        clientConfig.getProxyUserName(), clientConfig.getProxyPassword());
+                        clientConfig.getProxyHost(), clientConfig.getProxyPort());
             } else {
                 discoveryJerseyClient = EurekaJerseyClient.createJerseyClient("DiscoveryClient-HTTPClient",
                         clientConfig.getEurekaServerConnectTimeoutSeconds() * 1000,
@@ -325,7 +328,7 @@ public class DiscoveryClient implements EurekaClient {
                         clientConfig.getEurekaServerTotalConnections(),
                         clientConfig.getEurekaConnectionIdleTimeoutSeconds());
             }
-            discoveryApacheClient = discoveryJerseyClient.getClient();
+            jerseylient = discoveryJerseyClient.getClient();
             remoteRegionsToFetch = new AtomicReference<String>(clientConfig.fetchRegistryForRemoteRegions());
             AzToRegionMapper azToRegionMapper;
             if (clientConfig.shouldUseDnsForFetchingServiceUrls()) {
@@ -343,14 +346,14 @@ public class DiscoveryClient implements EurekaClient {
             if (enableGZIPContentEncodingFilter) {
                 // compressed only if there exists a 'Content-Encoding' header
                 // whose value is "gzip"
-                discoveryApacheClient.addFilter(new GZIPContentEncodingFilter(
-                        false));
+                jerseylient.register(GZipEncoder.class);
+                jerseylient.register(EncodingFilter.class);
             }
 
             // always enable client identity headers
             String ip = instanceInfo == null ? null : instanceInfo.getIPAddr();
             EurekaClientIdentity identity = new EurekaClientIdentity(ip);
-            discoveryApacheClient.addFilter(new EurekaIdentityHeaderFilter(identity));
+            jerseylient.register(new EurekaIdentityHeaderFilter(identity));
 
         } catch (Throwable e) {
             throw new RuntimeException("Failed to initialize DiscoveryClient!", e);
@@ -604,11 +607,11 @@ public class DiscoveryClient implements EurekaClient {
      */
     @Override
     public Applications getApplications(String serviceUrl) {
-        ClientResponse response = null;
+        Response response = null;
         Applications apps = null;
         try {
             response = makeRemoteCall(Action.Refresh);
-            apps = response.getEntity(Applications.class);
+            apps = response.readEntity(Applications.class);
             logger.debug(PREFIX + appPathIdentifier + " -  refresh status: "
                     + response.getStatus());
             return apps;
@@ -647,7 +650,7 @@ public class DiscoveryClient implements EurekaClient {
      */
     void register() throws Throwable {
         logger.info(PREFIX + appPathIdentifier + ": registering service...");
-        ClientResponse response = null;
+        Response response = null;
         try {
             response = makeRemoteCall(Action.Register);
             isRegisteredWithDiscovery = true;
@@ -667,7 +670,7 @@ public class DiscoveryClient implements EurekaClient {
      * Renew with the eureka service by making the appropriate REST call
      */
     void renew() {
-        ClientResponse response = null;
+        Response response = null;
         try {
             response = makeRemoteCall(Action.Renew);
             logger.debug("{} - Heartbeat status: {}", PREFIX + appPathIdentifier,
@@ -810,7 +813,7 @@ public class DiscoveryClient implements EurekaClient {
      * unregister w/ the eureka service.
      */
     void unregister() {
-        ClientResponse response = null;
+        Response response = null;
         try {
             response = makeRemoteCall(Action.Cancel);
 
@@ -842,7 +845,7 @@ public class DiscoveryClient implements EurekaClient {
      * @return true if the registry was fetched
      */
     private boolean fetchRegistry(boolean forceFullRegistryFetch) {
-        ClientResponse response = null;
+        Response response = null;
         Stopwatch tracer = FETCH_REGISTRY_TIMER.start();
 
         try {
@@ -950,14 +953,14 @@ public class DiscoveryClient implements EurekaClient {
      * @throws Throwable
      *             on error.
      */
-    private ClientResponse getAndStoreFullRegistry() throws Throwable {
+    private Response getAndStoreFullRegistry() throws Throwable {
         long currentUpdateGeneration = fetchRegistryGeneration.get();
-        ClientResponse response = makeRemoteCall(Action.Refresh);
+        Response response = makeRemoteCall(Action.Refresh);
         logger.info("Getting all instance registry info from the eureka server");
 
         Applications apps = null;
         if (response.getStatus() == Status.OK.getStatusCode()) {
-            apps = response.getEntity(Applications.class);
+            apps = response.readEntity(Applications.class);
         }
 
         if (apps == null) {
@@ -984,13 +987,13 @@ public class DiscoveryClient implements EurekaClient {
      * @return the client response
      * @throws Throwable on error
      */
-    private ClientResponse getAndUpdateDelta(Applications applications) throws Throwable {
+    private Response getAndUpdateDelta(Applications applications) throws Throwable {
         long currentUpdateGeneration = fetchRegistryGeneration.get();
-        ClientResponse response = makeRemoteCall(Action.Refresh_Delta);
+        Response response = makeRemoteCall(Action.Refresh_Delta);
 
         Applications delta = null;
         if (response.getStatus() == Status.OK.getStatusCode()) {
-            delta = response.getEntity(Applications.class);
+            delta = response.readEntity(Applications.class);
         }
         if (delta == null) {
             logger.warn("The server does not allow the delta revision to be applied because it is not safe. "
@@ -1054,7 +1057,7 @@ public class DiscoveryClient implements EurekaClient {
      * @throws Throwable
      *             on any error.
      */
-    private ClientResponse reconcileAndLogDifference(ClientResponse response,
+    private Response reconcileAndLogDifference(Response response,
                                                      Applications delta, String reconcileHashCode) throws Throwable {
         logger.warn(
                 "The Reconcile hashcodes do not match, client : {}, server : {}. Getting the full registry",
@@ -1064,7 +1067,7 @@ public class DiscoveryClient implements EurekaClient {
 
         long currentUpdateGeneration = fetchRegistryGeneration.get();
         response = makeRemoteCall(Action.Refresh);
-        Applications serverApps = response.getEntity(Applications.class);
+        Applications serverApps = response.readEntity(Applications.class);
 
         try {
             Map<String, List<String>> reconcileDiffMap = getApplications().getReconcileMapDiff(serverApps);
@@ -1176,8 +1179,8 @@ public class DiscoveryClient implements EurekaClient {
      * @throws Throwable
      *             on any error.
      */
-    private ClientResponse makeRemoteCall(Action action) throws Throwable {
-        ClientResponse response;
+    private Response makeRemoteCall(Action action) throws Throwable {
+        Response response;
         if (isQueryAction(action)) {
             response = makeRemoteCallToRedirectedServer(lastQueryRedirect, action);
         } else {
@@ -1189,11 +1192,11 @@ public class DiscoveryClient implements EurekaClient {
         return response;
     }
 
-    private ClientResponse makeRemoteCallToRedirectedServer(AtomicReference<String> lastRedirect, Action action) {
+    private Response makeRemoteCallToRedirectedServer(AtomicReference<String> lastRedirect, Action action) {
         String lastRedirectUrl = lastRedirect.get();
         if (lastRedirectUrl != null) {
             try {
-                ClientResponse clientResponse = makeRemoteCall(action, lastRedirectUrl);
+                Response clientResponse = makeRemoteCall(action, lastRedirectUrl);
                 int status = clientResponse.getStatus();
                 if (status >= 200 && status < 300) {
                     return clientResponse;
@@ -1226,7 +1229,7 @@ public class DiscoveryClient implements EurekaClient {
      * @throws Throwable
      *             on any error.
      */
-    private ClientResponse makeRemoteCall(Action action, int serviceUrlIndex) throws Throwable {
+    private Response makeRemoteCall(Action action, int serviceUrlIndex) throws Throwable {
         String serviceUrl;
         try {
             serviceUrl = eurekaServiceUrls.get().get(serviceUrlIndex);
@@ -1244,10 +1247,10 @@ public class DiscoveryClient implements EurekaClient {
         }
     }
 
-    private ClientResponse makeRemoteCallWithFollowRedirect(Action action, String serviceUrl) throws Throwable {
+    private Response makeRemoteCallWithFollowRedirect(Action action, String serviceUrl) throws Throwable {
         URI targetUrl = new URI(serviceUrl);
         for (int followRedirectCount = 0; followRedirectCount < MAX_FOLLOWED_REDIRECTS; followRedirectCount++) {
-            ClientResponse clientResponse = makeRemoteCall(action, targetUrl.toString());
+            Response clientResponse = makeRemoteCall(action, targetUrl.toString());
             if (clientResponse.getStatus() != 302) {
                 if (followRedirectCount > 0) {
                     if (isQueryAction(action)) {
@@ -1291,10 +1294,10 @@ public class DiscoveryClient implements EurekaClient {
      * @throws Throwable
      *             on any error.
      */
-    private ClientResponse makeRemoteCall(Action action, String serviceUrl) throws Throwable {
+    private Response makeRemoteCall(Action action, String serviceUrl) throws Throwable {
         String urlPath = null;
         Stopwatch tracer = null;
-        ClientResponse response = null;
+        Response response = null;
         logger.debug("Discovery Client talking to the server {}", serviceUrl);
         try {
             // If the application is unknown do not register/renew/cancel but
@@ -1304,22 +1307,20 @@ public class DiscoveryClient implements EurekaClient {
                     .equals(action)))) {
                 return null;
             }
-            WebResource r = discoveryApacheClient.resource(serviceUrl);
-            if (clientConfig.allowRedirects()) {
-                r.header(HTTP_X_DISCOVERY_ALLOW_REDIRECT, "true");
-            }
+            WebTarget r = jerseylient.target(serviceUrl);
             String remoteRegionsToFetchStr;
             switch (action) {
                 case Renew:
                     tracer = RENEW_TIMER.start();
                     urlPath = "apps/" + appPathIdentifier;
-                    response = r
-                            .path(urlPath)
+                    response = r.path(urlPath)
                             .queryParam("status",
                                     instanceInfo.getStatus().toString())
                             .queryParam("lastDirtyTimestamp",
                                     instanceInfo.getLastDirtyTimestamp().toString())
-                            .put(ClientResponse.class);
+                            .request()
+                            .header(HTTP_X_DISCOVERY_ALLOW_REDIRECT, clientConfig.allowRedirects())
+                            .put(EMPTY);
                     break;
                 case Refresh:
                     tracer = REFRESH_TIMER.start();
@@ -1344,18 +1345,17 @@ public class DiscoveryClient implements EurekaClient {
                     tracer = REGISTER_TIMER.start();
                     urlPath = "apps/" + instanceInfo.getAppName();
                     response = r.path(urlPath)
-                            .type(MediaType.APPLICATION_JSON_TYPE)
-                            .post(ClientResponse.class, instanceInfo);
+                            .request(MediaType.APPLICATION_JSON_TYPE)
+                            .post(Entity.json(instanceInfo));
                     break;
                 case Cancel:
                     tracer = CANCEL_TIMER.start();
                     urlPath = "apps/" + appPathIdentifier;
-                    response = r.path(urlPath).delete(ClientResponse.class);
+                    response = r.path(urlPath).request().delete();
                     // Return without during de-registration if it is not registered
                     // already and if we get a 404
                     if ((!isRegisteredWithDiscovery)
-                            && (response.getStatus() == Status.NOT_FOUND
-                            .getStatusCode())) {
+                            && (response.getStatus() == Status.NOT_FOUND.getStatusCode())) {
                         return response;
                     }
                     break;
@@ -1363,7 +1363,7 @@ public class DiscoveryClient implements EurekaClient {
 
             if (logger.isDebugEnabled()) {
                 logger.debug("Finished a call to service url {} and url path {} with status code {}.",
-                        new String[]{serviceUrl, urlPath, String.valueOf(response.getStatus())});
+                        serviceUrl, urlPath, String.valueOf(response.getStatus()));
             }
             if (isOk(action, response.getStatus())) {
                 return response;
@@ -1391,7 +1391,7 @@ public class DiscoveryClient implements EurekaClient {
      * @param response
      *            the HttpResponse object.
      */
-    private void closeResponse(ClientResponse response) {
+    private void closeResponse(Response response) {
         if (response != null) {
             try {
                 response.close();
@@ -1773,12 +1773,12 @@ public class DiscoveryClient implements EurekaClient {
         return instanceToReturn;
     }
 
-    private ClientResponse getUrl(String fullServiceUrl) {
-        ClientResponse cr = discoveryApacheClient.resource(fullServiceUrl)
+    private Response getUrl(String fullServiceUrl) {
+        return jerseylient.target(fullServiceUrl)
+                .request()
                 .accept(MediaType.APPLICATION_JSON_TYPE)
-                .get(ClientResponse.class);
+                .get();
 
-        return cr;
     }
 
     /**
@@ -1899,7 +1899,6 @@ public class DiscoveryClient implements EurekaClient {
      */
     private void fetchRegistryFromBackup() {
         try {
-            @SuppressWarnings("deprecation")
             BackupRegistry backupRegistryInstance = newBackupRegistryInstance();
             if (null == backupRegistryInstance) { // backward compatibility with the old protected method, in case it is being used.
                 backupRegistryInstance = backupRegistryProvider.get();

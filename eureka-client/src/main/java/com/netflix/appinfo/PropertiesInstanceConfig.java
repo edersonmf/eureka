@@ -231,8 +231,7 @@ public abstract class PropertiesInstanceConfig extends AbstractInstanceConfig
     @Override
     public Map<String, String> getMetadataMap() {
         Map<String, String> metadataMap = new LinkedHashMap<String, String>();
-        Configuration config = (Configuration) INSTANCE
-                .getBackingConfigurationSource();
+        Configuration config = (Configuration) DynamicPropertyFactory.getBackingConfigurationSource();
         String subsetPrefix = propMetadataNamespace.charAt(propMetadataNamespace.length() - 1) == '.'
                 ? propMetadataNamespace.substring(0, propMetadataNamespace.length() - 1)
                 : propMetadataNamespace;

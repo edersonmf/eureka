@@ -16,10 +16,8 @@
 
 package com.netflix.discovery.shared;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
 import java.io.FileInputStream;
+import java.net.InetAddress;
 import java.security.KeyStore;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -27,26 +25,25 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.ws.rs.client.Client;
+import javax.ws.rs.client.ClientBuilder;
+
+import org.apache.http.HttpHost;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.config.Registry;
+import org.apache.http.config.RegistryBuilder;
+import org.apache.http.conn.socket.ConnectionSocketFactory;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
+import org.glassfish.jersey.apache.connector.ApacheClientProperties;
+import org.glassfish.jersey.apache.connector.ApacheConnectorProvider;
+import org.glassfish.jersey.client.ClientConfig;
+
 import com.google.common.base.Preconditions;
 import com.netflix.discovery.provider.DiscoveryJerseyProvider;
-import com.netflix.servo.monitor.BasicCounter;
-import com.netflix.servo.monitor.BasicTimer;
-import com.netflix.servo.monitor.Counter;
-import com.netflix.servo.monitor.MonitorConfig;
-import com.netflix.servo.monitor.Monitors;
-import com.netflix.servo.monitor.Stopwatch;
-import com.sun.jersey.api.client.config.ClientConfig;
-import com.sun.jersey.client.apache4.ApacheHttpClient4;
-import com.sun.jersey.client.apache4.config.ApacheHttpClient4Config;
-import com.sun.jersey.client.apache4.config.DefaultApacheHttpClient4Config;
-import org.apache.http.client.params.ClientPNames;
-import org.apache.http.conn.scheme.Scheme;
-import org.apache.http.conn.scheme.SchemeRegistry;
-import org.apache.http.conn.ssl.SSLSocketFactory;
-import org.apache.http.params.HttpConnectionParams;
-import org.apache.http.params.HttpParams;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * A wrapper for Jersey Apache Client to set the necessary configurations.
@@ -83,10 +80,9 @@ public final class EurekaJerseyClient {
         Preconditions.checkNotNull(clientName, "Client name can not be null.");
         try {
             ClientConfig jerseyClientConfig = new CustomApacheHttpClientConfig(clientName, maxConnectionsPerHost,
-                    maxTotalConnections);
+                    maxTotalConnections, connectionTimeout, readTimeout, connectionIdleTimeout);
 
-            return new JerseyClient(connectionTimeout, readTimeout,
-                    connectionIdleTimeout, jerseyClientConfig);
+            return new JerseyClient(jerseyClientConfig);
         } catch (Throwable e) {
             throw new RuntimeException("Cannot create Jersey client ", e);
         }
@@ -120,14 +116,13 @@ public final class EurekaJerseyClient {
      */
     public static JerseyClient createProxyJerseyClient(String clientName, int connectionTimeout,
                                                        int readTimeout, int maxConnectionsPerHost, int maxTotalConnections, int connectionIdleTimeout,
-                                                       String proxyHost, String proxyPort, String proxyUserName, String proxyPassword) {
+                                                       String proxyHost, String proxyPort) {
         Preconditions.checkNotNull(clientName, "Client name can not be null.");
         try {
             ClientConfig jerseyClientConfig = new ProxyCustomApacheHttpClientConfig(clientName, maxConnectionsPerHost,
-                    maxTotalConnections, proxyHost, proxyPort, proxyUserName, proxyPassword);
+                    maxTotalConnections, proxyHost, proxyPort, connectionTimeout, readTimeout, connectionIdleTimeout);
 
-            return new JerseyClient(connectionTimeout, readTimeout,
-                    connectionIdleTimeout, jerseyClientConfig);
+            return new JerseyClient(jerseyClientConfig);
         } catch (Throwable e) {
             throw new RuntimeException("Cannot create Jersey client ", e);
         }
@@ -166,10 +161,9 @@ public final class EurekaJerseyClient {
         try {
             ClientConfig jerseyClientConfig = new SSLCustomApacheHttpClientConfig(
                     clientName, maxConnectionsPerHost, maxTotalConnections,
-                    trustStoreFileName, trustStorePassword);
+                    trustStoreFileName, trustStorePassword, connectionTimeout, readTimeout, connectionIdleTimeout);
 
-            return new JerseyClient(connectionTimeout, readTimeout,
-                    connectionIdleTimeout, jerseyClientConfig);
+            return new JerseyClient(jerseyClientConfig);
         } catch (Throwable e) {
             throw new RuntimeException("Cannot create SSL Jersey client ", e);
         }
@@ -201,68 +195,69 @@ public final class EurekaJerseyClient {
         Preconditions.checkNotNull(clientName, "Client name can not be null.");
         try {
             ClientConfig jerseyClientConfig = new SystemSSLCustomApacheHttpClientConfig(
-                    clientName, maxConnectionsPerHost, maxTotalConnections);
+                    clientName, maxConnectionsPerHost, maxTotalConnections, connectionTimeout, readTimeout, connectionIdleTimeout);
 
-            return new JerseyClient(connectionTimeout, readTimeout,
-                    connectionIdleTimeout, jerseyClientConfig);
+            return new JerseyClient(jerseyClientConfig);
         } catch (Throwable e) {
             throw new RuntimeException("Cannot create System SSL Jersey client ", e);
         }
     }
 
-    private static class CustomApacheHttpClientConfig extends DefaultApacheHttpClient4Config {
+    private static class CustomApacheHttpClientConfig extends ClientConfig {
 
-        public CustomApacheHttpClientConfig(String clientName, int maxConnectionsPerHost, int maxTotalConnections)
+        public CustomApacheHttpClientConfig(String clientName, int maxConnectionsPerHost, int maxTotalConnections, int connectionTimeout, int readTimeout, int connectionIdleTimeout)
                 throws Throwable {
-            MonitoredConnectionManager cm = new MonitoredConnectionManager(clientName);
+
+            connectorProvider(new ApacheConnectorProvider());
+            PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager();
             cm.setDefaultMaxPerRoute(maxConnectionsPerHost);
             cm.setMaxTotal(maxTotalConnections);
-            getProperties().put(ApacheHttpClient4Config.PROPERTY_CONNECTION_MANAGER, cm);
+            cm.closeExpiredConnections();
+            cm.closeIdleConnections(connectionIdleTimeout, TimeUnit.SECONDS);
+            property(ApacheClientProperties.CONNECTION_MANAGER, cm);
+
             // To pin a client to specific server in case redirect happens, we handle redirects directly
             // (see DiscoveryClient.makeRemoteCall methods).
-            getProperties().put(PROPERTY_FOLLOW_REDIRECTS, Boolean.FALSE);
-            getProperties().put(ClientPNames.HANDLE_REDIRECTS, Boolean.FALSE);
+            RequestConfig requestConfig = RequestConfig.custom()
+                .setRedirectsEnabled(Boolean.FALSE)
+                .setConnectTimeout(connectionTimeout)
+                .setSocketTimeout(readTimeout)
+                .build();
+            property(ApacheClientProperties.REQUEST_CONFIG, requestConfig);
         }
     }
 
-    private static class ProxyCustomApacheHttpClientConfig extends DefaultApacheHttpClient4Config {
+    private static class ProxyCustomApacheHttpClientConfig extends ClientConfig {
 
         public ProxyCustomApacheHttpClientConfig(String clientName, int maxConnectionsPerHost, int maxTotalConnections,
-                                                 String proxyHost, String proxyPort, String proxyUserName, String proxyPassword)
-                throws Throwable {
-            MonitoredConnectionManager cm = new MonitoredConnectionManager(clientName);
+                                                 String proxyHost, String proxyPort, int connectionTimeout, int readTimeout, int connectionIdleTimeout) throws Throwable {
+            connectorProvider(new ApacheConnectorProvider());
+            PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager();
             cm.setDefaultMaxPerRoute(maxConnectionsPerHost);
             cm.setMaxTotal(maxTotalConnections);
-            getProperties().put(ApacheHttpClient4Config.PROPERTY_CONNECTION_MANAGER, cm);
+            cm.closeExpiredConnections();
+            cm.closeIdleConnections(connectionIdleTimeout, TimeUnit.SECONDS);
+            property(ApacheClientProperties.CONNECTION_MANAGER, cm);
             // To pin a client to specific server in case redirect happens, we handle redirects directly
             // (see DiscoveryClient.makeRemoteCall methods).
-            getProperties().put(PROPERTY_FOLLOW_REDIRECTS, Boolean.FALSE);
-            getProperties().put(ClientPNames.HANDLE_REDIRECTS, Boolean.FALSE);
-
-            if (proxyUserName != null && proxyPassword != null) {
-                getProperties().put(ApacheHttpClient4Config.PROPERTY_PROXY_USERNAME, proxyUserName);
-                getProperties().put(ApacheHttpClient4Config.PROPERTY_PROXY_PASSWORD, proxyPassword);
-            } else {
-                // Due to bug in apache client, user name/password must always be set.
-                // Otherwise proxy configuration is ignored.
-                getProperties().put(ApacheHttpClient4Config.PROPERTY_PROXY_USERNAME, "guest");
-                getProperties().put(ApacheHttpClient4Config.PROPERTY_PROXY_PASSWORD, "guest");
-            }
-            getProperties().put(
-                    DefaultApacheHttpClient4Config.PROPERTY_PROXY_URI,
-                    "http://" + proxyHost + ":" + proxyPort);
+            RequestConfig requestConfig = RequestConfig.custom()
+                                                       .setRedirectsEnabled(Boolean.FALSE)
+                                                       .setProxy(new HttpHost(InetAddress.getByName(proxyHost), Integer.valueOf(proxyPort), "http"))
+                                                       .setConnectTimeout(connectionTimeout)
+                                                       .setSocketTimeout(readTimeout)
+                                                       .build();
+            property(ApacheClientProperties.REQUEST_CONFIG, requestConfig);
         }
     }
 
-    private static class SSLCustomApacheHttpClientConfig extends DefaultApacheHttpClient4Config {
+    private static class SSLCustomApacheHttpClientConfig extends ClientConfig {
         private static final String PROTOCOL_SCHEME = "SSL";
-        private static final int HTTPS_PORT = 443;
         private static final String PROTOCOL = "https";
         private static final String KEYSTORE_TYPE = "JKS";
 
         public SSLCustomApacheHttpClientConfig(String clientName, int maxConnectionsPerHost,
                                                int maxTotalConnections, String trustStoreFileName,
-                                               String trustStorePassword) throws Throwable {
+                                               String trustStorePassword, int connectionTimeout, int readTimeout, int connectionIdleTimeout) throws Throwable {
 
             SSLContext sslContext = SSLContext.getInstance(PROTOCOL_SCHEME);
             TrustManagerFactory tmf = TrustManagerFactory
@@ -274,21 +269,29 @@ public final class EurekaJerseyClient {
                 sslKeyStore.load(fin, trustStorePassword.toCharArray());
                 tmf.init(sslKeyStore);
                 sslContext.init(null, createTrustManagers(sslKeyStore), null);
-                SSLSocketFactory sslSocketFactory = new SSLSocketFactory(
-                        sslContext);
-                sslSocketFactory
-                        .setHostnameVerifier(SSLSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER);
-                SchemeRegistry sslSchemeRegistry = new SchemeRegistry();
-                sslSchemeRegistry.register(new Scheme(PROTOCOL, HTTPS_PORT, sslSocketFactory));
 
-                MonitoredConnectionManager cm = new MonitoredConnectionManager(clientName, sslSchemeRegistry);
+                connectorProvider(new ApacheConnectorProvider());
+
+                SSLConnectionSocketFactory sslConnectionSocketFactory = new SSLConnectionSocketFactory(sslContext);
+                Registry<ConnectionSocketFactory> registry = RegistryBuilder.<ConnectionSocketFactory>create()
+                    .register(PROTOCOL, sslConnectionSocketFactory)
+                    .build();
+
+                PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager(registry);
+//                MonitoredConnectionManager cm = new MonitoredConnectionManager(clientName, sslSchemeRegistry);
                 cm.setDefaultMaxPerRoute(maxConnectionsPerHost);
                 cm.setMaxTotal(maxTotalConnections);
+                cm.closeExpiredConnections();
+                cm.closeIdleConnections(connectionIdleTimeout, TimeUnit.SECONDS);
                 // To pin a client to specific server in case redirect happens, we handle redirects directly
                 // (see DiscoveryClient.makeRemoteCall methods).
-                getProperties().put(ApacheHttpClient4Config.PROPERTY_CONNECTION_MANAGER, cm);
-                getProperties().put(PROPERTY_FOLLOW_REDIRECTS, Boolean.FALSE);
-                getProperties().put(ClientPNames.HANDLE_REDIRECTS, Boolean.FALSE);
+                property(ApacheClientProperties.CONNECTION_MANAGER, cm);
+                RequestConfig requestConfig = RequestConfig.custom()
+                    .setRedirectsEnabled(Boolean.FALSE)
+                    .setConnectTimeout(connectionTimeout)
+                    .setSocketTimeout(readTimeout)
+                    .build();
+                property(ApacheClientProperties.REQUEST_CONFIG, requestConfig);
             } finally {
                 if (fin != null) {
                     fin.close();
@@ -300,8 +303,7 @@ public final class EurekaJerseyClient {
         private static TrustManager[] createTrustManagers(KeyStore trustStore) {
             TrustManagerFactory factory;
             try {
-                factory = TrustManagerFactory.getInstance(TrustManagerFactory
-                        .getDefaultAlgorithm());
+                factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
                 factory.init(trustStore);
             } catch (Throwable e) {
                 throw new RuntimeException(e);
@@ -314,33 +316,39 @@ public final class EurekaJerseyClient {
         }
     }
 
-    private static class SystemSSLCustomApacheHttpClientConfig extends DefaultApacheHttpClient4Config {
-        private static final int HTTPS_PORT = 443;
+    private static class SystemSSLCustomApacheHttpClientConfig extends ClientConfig {
         private static final String PROTOCOL = "https";
 
         public SystemSSLCustomApacheHttpClientConfig(String clientName, int maxConnectionsPerHost,
-                                                     int maxTotalConnections) throws Throwable {
+                                                     int maxTotalConnections, int connectionTimeout, int readTimeout, int connectionIdleTimeout) throws Throwable {
 
-            SSLSocketFactory sslSocketFactory = SSLSocketFactory.getSystemSocketFactory();
-            SchemeRegistry sslSchemeRegistry = new SchemeRegistry();
-            sslSchemeRegistry.register(new Scheme(PROTOCOL, HTTPS_PORT, sslSocketFactory));
-
-            MonitoredConnectionManager cm = new MonitoredConnectionManager(clientName, sslSchemeRegistry);
+            connectorProvider(new ApacheConnectorProvider());
+  
+            SSLConnectionSocketFactory sslConnectionSocketFactory = SSLConnectionSocketFactory.getSystemSocketFactory();
+            Registry<ConnectionSocketFactory> registry = RegistryBuilder.<ConnectionSocketFactory>create()
+                .register(PROTOCOL, sslConnectionSocketFactory)
+                .build();
+  
+            PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager(registry);
             cm.setDefaultMaxPerRoute(maxConnectionsPerHost);
             cm.setMaxTotal(maxTotalConnections);
-            getProperties().put(ApacheHttpClient4Config.PROPERTY_CONNECTION_MANAGER, cm);
+            cm.closeExpiredConnections();
+            cm.closeIdleConnections(connectionIdleTimeout, TimeUnit.SECONDS);
+            property(ApacheClientProperties.CONNECTION_MANAGER, cm);
             // To pin a client to specific server in case redirect happens, we handle redirects directly
             // (see DiscoveryClient.makeRemoteCall methods).
-            getProperties().put(PROPERTY_FOLLOW_REDIRECTS, Boolean.FALSE);
-            getProperties().put(ClientPNames.HANDLE_REDIRECTS, Boolean.FALSE);
+            RequestConfig requestConfig = RequestConfig.custom()
+                .setRedirectsEnabled(Boolean.FALSE)
+                .setConnectTimeout(connectionTimeout)
+                .setSocketTimeout(readTimeout)
+                .build();
+            property(ApacheClientProperties.REQUEST_CONFIG, requestConfig);
         }
     }
 
     public static class JerseyClient {
 
-        private static final int HTTP_CONNECTION_CLEANER_INTERVAL_MS = 30 * 1000;
-
-        private ApacheHttpClient4 apacheHttpClient;
+        private Client jerseyClient;
 
         ClientConfig jerseyClientConfig;
 
@@ -357,31 +365,19 @@ public final class EurekaJerseyClient {
                     }
                 });
 
-        private static final Logger s_logger = LoggerFactory.getLogger(JerseyClient.class);
-
-        public ApacheHttpClient4 getClient() {
-            return apacheHttpClient;
+        public Client getClient() {
+            return jerseyClient;
         }
 
         public ClientConfig getClientconfig() {
             return jerseyClientConfig;
         }
 
-        public JerseyClient(int connectionTimeout, int readTimeout, final int connectionIdleTimeout,
-                            ClientConfig clientConfig) {
+        public JerseyClient(ClientConfig clientConfig) {
             try {
                 jerseyClientConfig = clientConfig;
-                jerseyClientConfig.getClasses().add(DiscoveryJerseyProvider.class);
-                apacheHttpClient = ApacheHttpClient4.create(jerseyClientConfig);
-                HttpParams params = apacheHttpClient.getClientHandler().getHttpClient().getParams();
-
-                HttpConnectionParams.setConnectionTimeout(params, connectionTimeout);
-                HttpConnectionParams.setSoTimeout(params, readTimeout);
-
-                eurekaConnCleaner.scheduleWithFixedDelay(
-                        new ConnectionCleanerTask(connectionIdleTimeout), HTTP_CONNECTION_CLEANER_INTERVAL_MS,
-                        HTTP_CONNECTION_CLEANER_INTERVAL_MS,
-                        TimeUnit.MILLISECONDS);
+                jerseyClientConfig.register(DiscoveryJerseyProvider.class);
+                jerseyClient = ClientBuilder.newBuilder().withConfig(jerseyClientConfig).build();
             } catch (Throwable e) {
                 throw new RuntimeException("Cannot create Jersey client", e);
             }
@@ -395,49 +391,6 @@ public final class EurekaJerseyClient {
             if (eurekaConnCleaner != null) {
                 eurekaConnCleaner.shutdown();
             }
-            if (apacheHttpClient != null) {
-                apacheHttpClient.destroy();
-            }
-        }
-
-        private class ConnectionCleanerTask implements Runnable {
-
-            private final int connectionIdleTimeout;
-            private final BasicTimer executionTimeStats;
-            private final Counter cleanupFailed;
-
-            public ConnectionCleanerTask(int connectionIdleTimeout) {
-                this.connectionIdleTimeout = connectionIdleTimeout;
-                MonitorConfig.Builder monitorConfigBuilder = MonitorConfig.builder("Eureka-Connection-Cleaner-Time");
-                executionTimeStats = new BasicTimer(monitorConfigBuilder.build());
-                cleanupFailed = new BasicCounter(MonitorConfig.builder("Eureka-Connection-Cleaner-Failure").build());
-                try {
-                    Monitors.registerObject(this);
-                } catch (Exception e) {
-                    s_logger.error("Unable to register with servo.", e);
-                }
-            }
-
-            @Override
-            public void run() {
-                Stopwatch start = executionTimeStats.start();
-                try {
-                    apacheHttpClient
-                            .getClientHandler()
-                            .getHttpClient()
-                            .getConnectionManager()
-                            .closeIdleConnections(connectionIdleTimeout, TimeUnit.SECONDS);
-                } catch (Throwable e) {
-                    s_logger.error("Cannot clean connections", e);
-                    cleanupFailed.increment();
-                } finally {
-                    if (null != start) {
-                        start.stop();
-                    }
-                }
-
-            }
-
         }
     }
 
